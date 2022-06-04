@@ -1,0 +1,12 @@
+[package]
+name = "breadx-shm"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+breadx = { path = "../breadx/breadx", default-features = false, features = ["shm"] }
+breadx-image = { path = "../breadx-image", default-features = false }
+breadx-special-events = { path = "../breadx-special-events", default-features = false }
+libc = { version = "0.2.126", default-features = false }

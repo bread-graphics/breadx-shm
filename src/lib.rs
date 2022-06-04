@@ -1,0 +1,344 @@
+// MIT/Apache2 License
+
+#![cfg(unix)]
+#![deny(unsafe_code)]
+#![allow(clippy::too_many_arguments)]
+
+mod shm;
+use std::{
+    borrow::{Borrow, BorrowMut},
+    ops::{Deref, DerefMut},
+};
+
+use shm::{ShmBlock, ShmTransport};
+
+use breadx::{
+    display::Cookie,
+    display::{Display, DisplayExt as _, DisplayFunctionsExt},
+    protocol::{
+        shm as xshm,
+        xproto::{Drawable, Gcontext}, Event,
+    },
+    Result,
+};
+use breadx_image::Image;
+use breadx_special_events::SpecialEventDisplay;
+
+/// A segment attached to the X11 server.
+pub struct ShmSegment {
+    /// The block of SHM memory shared between the client and the server.
+    block: ShmBlock,
+    /// The segment ID used by the server to keep track of the segment.
+    seg_id: xshm::Seg,
+}
+
+/// A segment attached to X11 for the purpose of receiving SHM images.
+pub struct ShmReceiver {
+    /// The transport to the X11 server.
+    transport: ShmTransport,
+    /// The segment ID used by the server to keep track of the segment.
+    seg_id: xshm::Seg,
+}
+
+pub type ShmImage = Image<ShmSegment>;
+pub type ShmRecvImage = Image<ShmReceiver>;
+
+impl AsRef<[u8]> for ShmSegment {
+    fn as_ref(&self) -> &[u8] {
+        self.block.as_ref()
+    }
+}
+
+impl AsRef<[u8]> for ShmReceiver {
+    fn as_ref(&self) -> &[u8] {
+        self.transport.as_ref()
+    }
+}
+
+impl AsMut<[u8]> for ShmSegment {
+    fn as_mut(&mut self) -> &mut [u8] {
+        self.block.as_mut()
+    }
+}
+
+impl AsMut<[u8]> for ShmReceiver {
+    fn as_mut(&mut self) -> &mut [u8] {
+        self.transport.as_mut()
+    }
+}
+
+impl Borrow<[u8]> for ShmSegment {
+    fn borrow(&self) -> &[u8] {
+        self.block.borrow()
+    }
+}
+
+impl Borrow<[u8]> for ShmReceiver {
+    fn borrow(&self) -> &[u8] {
+        self.transport.borrow()
+    }
+}
+
+impl BorrowMut<[u8]> for ShmSegment {
+    fn borrow_mut(&mut self) -> &mut [u8] {
+        self.block.borrow_mut()
+    }
+}
+
+impl BorrowMut<[u8]> for ShmReceiver {
+    fn borrow_mut(&mut self) -> &mut [u8] {
+        self.transport.borrow_mut()
+    }
+}
+
+impl Deref for ShmSegment {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.block.as_ref()
+    }
+}
+
+impl Deref for ShmReceiver {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.transport.as_ref()
+    }
+}
+
+impl DerefMut for ShmSegment {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.block.as_mut()
+    }
+}
+
+impl DerefMut for ShmReceiver {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.transport.as_mut()
+    }
+}
+
+impl ShmSegment {
+    /// Creates a new SHM segment and attaches it to the X11 server.
+    pub fn attach(display: &mut impl Display, len: usize) -> Result<Self> {
+        // first, create the underlying SHM block
+        let block = ShmBlock::new(len)?;
+
+        // now, attach the block to the X11 server
+        let seg_id = display.generate_xid()?;
+        display.shm_attach_checked(seg_id, block.shm_id() as _, true)?;
+
+        Ok(Self { block, seg_id })
+    }
+
+    /// Detaches the SHM segment from the server.
+    pub fn detach(self, display: &mut impl Display) -> Result<()> {
+        display.shm_detach_checked(self.seg_id)
+    }
+
+    pub fn mark_shared(&mut self) {
+        self.block.make_shared();
+    }
+
+    #[allow(unsafe_code)]
+    pub unsafe fn mark_unshared(&mut self) {
+        self.block.make_unshared();
+    }
+}
+
+impl ShmReceiver {
+    /// Creates a new SHM receiver and attaches it to the X11 server.
+    pub fn attach(display: &mut impl Display, len: usize) -> Result<Self> {
+        // first, create the underlying SHM block
+        let block = ShmTransport::new(len)?;
+
+        // now, attach the block to the X11 server
+        let seg_id = display.generate_xid()?;
+        display.shm_attach_checked(seg_id, block.shm_id() as _, false)?;
+
+        Ok(Self {
+            transport: block,
+            seg_id,
+        })
+    }
+
+    /// Detaches the SHM segment from the server.
+    pub fn detach(self, display: &mut impl Display) -> Result<()> {
+        display.shm_detach_checked(self.seg_id)
+    }
+
+    #[allow(unsafe_code)]
+    pub unsafe fn repopulate(&mut self) {
+        self.transport.repopulate();
+    }
+
+    fn shm_id(&self) -> i32 {
+        self.transport.shm_id()
+    }
+}
+
+/// Extension traits for a normal display.
+pub trait DisplayExt: Display {
+    /// Get an image from the server through an SHM transport.
+    fn shm_get_ximage(
+        &mut self,
+        image: &mut ShmRecvImage,
+        drawable: impl Into<Drawable>,
+        x: i16,
+        y: i16,
+        plane_mask: u32
+    ) -> Result<xshm::GetImageReply> {
+        let reply = self.shm_get_image_immediate(
+            drawable.into(), 
+            x, 
+            y, 
+            image.width() as _, 
+            image.height() as _, 
+            plane_mask, 
+            image.format().format().into(), 
+            image.storage().shm_id() as _, 0,)?;
+
+        // SAFETY: the image is now populated
+        #[allow(unsafe_code)]
+        unsafe {
+            image.storage_mut().repopulate();
+        }
+
+        Ok(reply)
+    }
+
+    /// Send an SHM image to the server.
+    ///
+    /// Manually marking the image as unshared in an
+    /// unsafe exercise.
+    ///
+    /// `neh` stands for "no event handling".
+    fn shm_put_ximage_neh(
+        &mut self,
+        image: &mut ShmImage,
+        drawable: impl Into<Drawable>,
+        gc: impl Into<Gcontext>,
+        src_x: u16,
+        src_y: u16,
+        width: u16,
+        height: u16,
+        dest_x: i16,
+        dest_y: i16,
+        send_event: bool,
+    ) -> Result<Cookie<()>> {
+        let cookie = self.shm_put_image(
+            drawable.into(),
+            gc.into(),
+            image.width() as _,
+            image.height() as _,
+            src_x,
+            src_y,
+            width,
+            height,
+            dest_x,
+            dest_y,
+            image.depth(),
+            image.format().format().into(),
+            send_event,
+            image.storage().seg_id,
+            0,
+        )?;
+        image.storage_mut().mark_shared();
+        Ok(cookie)
+    }
+
+    /// `shm_put_ximage_neh` but checked.
+    fn shm_put_ximage_neh_checked(
+        &mut self,
+        image: &mut ShmImage,
+        drawable: impl Into<Drawable>,
+        gc: impl Into<Gcontext>,
+        src_x: u16,
+        src_y: u16,
+        width: u16,
+        height: u16,
+        dest_x: i16,
+        dest_y: i16,
+        send_event: bool,
+    ) -> Result<()> {
+        let cookie = self.shm_put_ximage_neh(
+            image, drawable, gc, src_x, src_y, width, height, dest_x, dest_y, send_event,
+        )?;
+        self.wait_for_reply(cookie)
+    }
+}
+
+impl<D: Display + ?Sized> DisplayExt for D {}
+
+/// Extension traits for a special event display.
+pub trait SEDExt {
+    /// Setup a special event queue for SHM.
+    fn shm_setup_queue(&mut self) -> usize;
+
+    /// Send an SHM image to the X11 server.
+    fn shm_put_ximage(
+        &mut self,
+        image: &mut ShmImage,
+        drawable: impl Into<Drawable>,
+        gc: impl Into<Gcontext>,
+        src_x: u16,
+        src_y: u16,
+        width: u16,
+        height: u16,
+        dest_x: i16,
+        dest_y: i16,
+        shm_event_key: usize,
+    ) -> Result<()>;
+}
+
+impl<D: Display + ?Sized> SEDExt for SpecialEventDisplay<D> {
+    fn shm_setup_queue(&mut self) -> usize {
+        self.create_special_event_queue(|event| matches!(event, Event::ShmCompletion(..)))
+    }
+
+    fn shm_put_ximage(
+            &mut self,
+            image: &mut ShmImage,
+            drawable: impl Into<Drawable>,
+            gc: impl Into<Gcontext>,
+            src_x: u16,
+            src_y: u16,
+            width: u16,
+            height: u16,
+            dest_x: i16,
+            dest_y: i16,
+            shm_event_key: usize,
+        ) -> Result<()> { 
+        // send the image, first things first
+        self.shm_put_ximage_neh_checked(image, drawable, gc, src_x, src_y, width, height, dest_x, dest_y, true)?;
+
+        // wait for the completion event
+        loop {
+            let event = self.wait_for_special_event(shm_event_key)?;
+
+            // make sure that the event is for the right image
+            let completion = match event {
+                Event::ShmCompletion(completion) => completion,
+                _ => panic!("expected SHM completion event"),
+            };
+
+            if completion.shmseg != image.storage().seg_id {
+                // we received another image's completion event, send it back
+                // so it continues propogating
+                continue;
+                // todo!("bug psychon into adding serialization methods to events");
+            }
+
+            // the image is no longer shared, we can mark it as such
+            #[allow(unsafe_code)]
+            unsafe {
+                image.storage_mut().mark_unshared();
+            }
+
+            break;
+        }
+
+        Ok(())
+    }
+}
