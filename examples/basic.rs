@@ -125,19 +125,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         &wm_delete_window,
     )?;
 
-    // paint the window before we start
-    conn.copy_area_checked(
-        pixmap,
-        wid,
-        window_gc,
-        0,
-        0,
-        0,
-        0,
-        img.width() as _,
-        img.height() as _,
-    )?;
-
     loop {
         let event = conn.wait_for_event()?;
 
