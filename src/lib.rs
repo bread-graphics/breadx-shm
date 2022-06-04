@@ -17,7 +17,8 @@ use breadx::{
     display::{Display, DisplayExt as _, DisplayFunctionsExt},
     protocol::{
         shm as xshm,
-        xproto::{Drawable, Gcontext}, Event,
+        xproto::{Drawable, Gcontext},
+        Event,
     },
     Result,
 };
@@ -187,17 +188,19 @@ pub trait DisplayExt: Display {
         drawable: impl Into<Drawable>,
         x: i16,
         y: i16,
-        plane_mask: u32
+        plane_mask: u32,
     ) -> Result<xshm::GetImageReply> {
         let reply = self.shm_get_image_immediate(
-            drawable.into(), 
-            x, 
-            y, 
-            image.width() as _, 
-            image.height() as _, 
-            plane_mask, 
-            image.format().format().into(), 
-            image.storage().shm_id() as _, 0,)?;
+            drawable.into(),
+            x,
+            y,
+            image.width() as _,
+            image.height() as _,
+            plane_mask,
+            image.format().format().into(),
+            image.storage().shm_id() as _,
+            0,
+        )?;
 
         // SAFETY: the image is now populated
         #[allow(unsafe_code)]
@@ -298,20 +301,22 @@ impl<D: Display + ?Sized> SEDExt for SpecialEventDisplay<D> {
     }
 
     fn shm_put_ximage(
-            &mut self,
-            image: &mut ShmImage,
-            drawable: impl Into<Drawable>,
-            gc: impl Into<Gcontext>,
-            src_x: u16,
-            src_y: u16,
-            width: u16,
-            height: u16,
-            dest_x: i16,
-            dest_y: i16,
-            shm_event_key: usize,
-        ) -> Result<()> { 
+        &mut self,
+        image: &mut ShmImage,
+        drawable: impl Into<Drawable>,
+        gc: impl Into<Gcontext>,
+        src_x: u16,
+        src_y: u16,
+        width: u16,
+        height: u16,
+        dest_x: i16,
+        dest_y: i16,
+        shm_event_key: usize,
+    ) -> Result<()> {
         // send the image, first things first
-        self.shm_put_ximage_neh_checked(image, drawable, gc, src_x, src_y, width, height, dest_x, dest_y, true)?;
+        self.shm_put_ximage_neh_checked(
+            image, drawable, gc, src_x, src_y, width, height, dest_x, dest_y, true,
+        )?;
 
         // wait for the completion event
         loop {
@@ -341,4 +346,8 @@ impl<D: Display + ?Sized> SEDExt for SpecialEventDisplay<D> {
 
         Ok(())
     }
+}
+
+pub mod prelude {
+    pub use crate::{DisplayExt, SEDExt};
 }
