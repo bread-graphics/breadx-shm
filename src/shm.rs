@@ -1,26 +1,28 @@
-// MIT/Apache2 License
+//               Copyright John Nunley, 2022.
+// Distributed under the Boost Software License, Version 1.0.
+//       (See accompanying file LICENSE or copy at
+//         https://www.boost.org/LICENSE_1_0.txt)
 
-// unsafe code is quarantined into this module
+// unsafe code is common into this module
 #![allow(unsafe_code, unused_unsafe)]
 
 use libc::{c_int, c_uint};
 use std::{
     borrow::{Borrow, BorrowMut},
     io::{Error, Result},
-    mem::MaybeUninit,
     ops::{Deref, DerefMut},
     ptr::{null_mut, slice_from_raw_parts_mut, NonNull},
 };
 
 macro_rules! syscall {
     ($expr: expr) => {{
-        match ($expr) {
+        match unsafe { $expr } {
             -1 => return Err(Error::last_os_error()),
             a => a,
         }
     }};
     ($expr: expr, null) => {{
-        match ($expr) {
+        match unsafe { $expr } {
             a if a.is_null() => return Err(Error::last_os_error()),
             a => a,
         }
@@ -28,6 +30,16 @@ macro_rules! syscall {
 }
 
 /// An SHM segment allocated to be used in X11.
+///
+/// It is invariant to the structure, unless otherwise noted, that
+/// the shared memory segment is set to the flags 0744. This ensures
+/// that only the current process has write access to the memory; the X11
+/// server we send it to does not. 
+/// 
+/// While it is possible to change the
+/// data while the X server is reading it, several heated conversations
+/// on the Rust discord server have assured me that Rust is an independent
+/// Sigma male that doesn't care what happens to other processes.
 #[derive(Debug)]
 pub(crate) struct ShmBlock {
     /// The ID associated with the SHM segment.
@@ -41,13 +53,20 @@ pub(crate) struct ShmBlock {
     /// While this struct is active, this will always point to a valid
     /// region of memory.
     ptr: NonNull<[u8]>,
-    /// This segment is currently being read by the X server, so it
-    /// cannot be modified.
-    shared: bool,
 }
 
 /// A block of memory that uses SHM as a transport.
-pub struct ShmTransport {
+///
+/// The inner `ShmBlock` in this case is not required to only be read
+/// only. In order to prevent a potentially malicious X server from
+/// modifying our memory while we're using it, thus creating a race
+/// condition, the user interacts with a heap block of memory instead.
+/// Changes are downloaded from or uploaded to the SHM block using
+/// specific methods.
+///
+/// While a race condition is still possible in this way, its impacts
+/// are significantly less catastrophic than it would be
+pub(crate) struct ShmTransport {
     /// The user-accessible block of memory.
     block: Box<[u8]>,
     /// The SHM segment associated with this block.
@@ -63,10 +82,6 @@ impl AsRef<[u8]> for ShmBlock {
 
 impl AsMut<[u8]> for ShmBlock {
     fn as_mut(&mut self) -> &mut [u8] {
-        if self.shared {
-            panic!("Cannot modify shared segment");
-        }
-
         // SAFETY: ptr isn't being read by the X server (or if it is,
         // we don't really care), so it is safe to modify it
         unsafe { self.ptr.as_mut() }
@@ -162,7 +177,7 @@ impl ShmBlock {
     /// `flags` are used beyond 0744.
     unsafe fn with_flags(len: usize, flags: c_uint) -> Result<ShmBlock> {
         // create the SHM ID
-        let shm_id = syscall!(unsafe {
+        let shm_id = syscall!({
             libc::shmget(
                 libc::IPC_PRIVATE,
                 len as _,
@@ -171,17 +186,23 @@ impl ShmBlock {
         });
 
         // attach the SHM segment to an address
-        let ptr = syscall!(unsafe { libc::shmat(shm_id, null_mut(), 0,) }, null);
+        let ptr = syscall!(libc::shmat(shm_id, null_mut(), 0,), null);
 
         // let's create the end result
         Ok(ShmBlock {
             ptr: unsafe { NonNull::new_unchecked(slice_from_raw_parts_mut(ptr.cast(), len)) },
             shm_id,
-            shared: false,
         })
     }
 
     /// Get the SHM ID associated with this segment.
+    ///
+    /// # Safety
+    ///
+    /// This function may actually be unsafe. The SHM ID can be given
+    /// to other processes, which can use the ID as a lever for other
+    /// unsafe operations. But this is an internal-only function, so I
+    /// really don't care.
     pub fn shm_id(&self) -> c_int {
         self.shm_id
     }
@@ -204,26 +225,6 @@ impl ShmBlock {
     /// Tell whether this item is empty.
     pub fn is_empty(&self) -> bool {
         self.as_ref().is_empty()
-    }
-
-    /// Tell whether this item is shared.
-    pub fn is_shared(&self) -> bool {
-        self.shared
-    }
-
-    /// Indicate that this segment is being used by the server.
-    pub fn make_shared(&mut self) {
-        self.shared = true;
-    }
-
-    /// Indicate that this segment is no longer being used by the server.
-    ///
-    /// # Safety
-    ///
-    /// The user must be entirely sure that the server is no longer using
-    /// this segment.
-    pub unsafe fn make_unshared(&mut self) {
-        self.shared = false;
     }
 }
 
@@ -268,5 +269,14 @@ impl ShmTransport {
     /// SHM block must not be in use by the server.
     pub unsafe fn repopulate(&mut self) {
         self.block.copy_from_slice(&self.segment);
+    }
+
+    /// Publish the data into the segment.
+    ///
+    /// # Safety
+    ///
+    /// SHM block must not be in use by the server.
+    pub unsafe fn publish(&mut self) {
+        self.segment.copy_from_slice(&self.block);
     }
 }

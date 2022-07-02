@@ -1,21 +1,22 @@
 // MIT/Apache2 License
 
-use breadx::{display::DisplayConnection, prelude::*, protocol::xproto};
-use breadx_image::{prelude::*, Image};
-use breadx_shm::{prelude::*, ShmImage, ShmSegment};
-use breadx_special_events::SpecialEventDisplay;
-use std::{boxed::Box, error::Error, io::Cursor};
+use breadx::{
+    display::{DisplayConnection, DisplayExt as _},
+    prelude::*,
+    protocol::{xproto, Event},
+};
+use breadx_shm::{ShmDisplayExt, ShmImage, ShmSegment};
+use std::{boxed::Box, collections::VecDeque, error::Error, io::Cursor};
 
 const EISENHOWER: &[u8] = include_bytes!("../images/eisenhower.png");
 
 fn main() -> Result<(), Box<dyn Error>> {
     tracing_subscriber::fmt::init();
 
-    use breadx::protocol::Event;
-    use breadx_image::DisplayExt;
+    let mut conn = DisplayConnection::connect(None)?;
 
-    let mut conn = SpecialEventDisplay::from(DisplayConnection::connect(None)?);
-    let shm_event_key = conn.shm_setup_queue();
+    // queue to put overflow events into
+    let mut overflow_queue = VecDeque::new();
 
     // set up a window to be displayed and a gc for that window
     // see basic.rs in breadx for a more in depth explanation
@@ -106,7 +107,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         img.height() as _,
         0,
         0,
-        shm_event_key,
+        &mut overflow_queue,
     )?;
 
     // now, let's enter the main loop
@@ -126,7 +127,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     )?;
 
     loop {
-        let event = conn.wait_for_event()?;
+        let event = overflow_queue
+            .pop_front()
+            .map_or_else(|| conn.wait_for_event(), Ok)?;
 
         match event {
             Event::Expose(_) => {

@@ -1,4 +1,9 @@
-// MIT/Apache2 License
+//               Copyright John Nunley, 2022.
+// Distributed under the Boost Software License, Version 1.0.
+//       (See accompanying file LICENSE or copy at
+//         https://www.boost.org/LICENSE_1_0.txt)
+
+//! Provides a safe wrapper over the X11 shared memory extension.
 
 #![cfg(unix)]
 #![deny(unsafe_code)]
@@ -7,6 +12,7 @@
 mod shm;
 use std::{
     borrow::{Borrow, BorrowMut},
+    iter::Extend,
     ops::{Deref, DerefMut},
 };
 
@@ -23,7 +29,6 @@ use breadx::{
     Result,
 };
 use breadx_image::Image;
-use breadx_special_events::SpecialEventDisplay;
 
 /// A segment attached to the X11 server.
 pub struct ShmSegment {
@@ -124,7 +129,7 @@ impl ShmSegment {
     /// Creates a new SHM segment and attaches it to the X11 server.
     pub fn attach(display: &mut impl Display, len: usize) -> Result<Self> {
         // first, create the underlying SHM block
-        let block = ShmBlock::new(len)?;
+        let block = ShmBlock::new(len).unwrap();
 
         // now, attach the block to the X11 server
         let seg_id = display.generate_xid()?;
@@ -137,22 +142,13 @@ impl ShmSegment {
     pub fn detach(self, display: &mut impl Display) -> Result<()> {
         display.shm_detach_checked(self.seg_id)
     }
-
-    pub fn mark_shared(&mut self) {
-        self.block.make_shared();
-    }
-
-    #[allow(unsafe_code)]
-    pub unsafe fn mark_unshared(&mut self) {
-        self.block.make_unshared();
-    }
 }
 
 impl ShmReceiver {
     /// Creates a new SHM receiver and attaches it to the X11 server.
     pub fn attach(display: &mut impl Display, len: usize) -> Result<Self> {
         // first, create the underlying SHM block
-        let block = ShmTransport::new(len)?;
+        let block = ShmTransport::new(len).unwrap();
 
         // now, attach the block to the X11 server
         let seg_id = display.generate_xid()?;
@@ -170,8 +166,10 @@ impl ShmReceiver {
     }
 
     #[allow(unsafe_code)]
-    pub unsafe fn repopulate(&mut self) {
-        self.transport.repopulate();
+    pub fn repopulate(&mut self) {
+        unsafe {
+            self.transport.repopulate();
+        }
     }
 
     fn shm_id(&self) -> i32 {
@@ -180,7 +178,7 @@ impl ShmReceiver {
 }
 
 /// Extension traits for a normal display.
-pub trait DisplayExt: Display {
+pub trait ShmDisplayExt: Display {
     /// Get an image from the server through an SHM transport.
     fn shm_get_ximage(
         &mut self,
@@ -203,18 +201,12 @@ pub trait DisplayExt: Display {
         )?;
 
         // SAFETY: the image is now populated
-        #[allow(unsafe_code)]
-        unsafe {
-            image.storage_mut().repopulate();
-        }
+        image.storage_mut().repopulate();
 
         Ok(reply)
     }
 
     /// Send an SHM image to the server.
-    ///
-    /// Manually marking the image as unshared in an
-    /// unsafe exercise.
     ///
     /// `neh` stands for "no event handling".
     fn shm_put_ximage_neh(
@@ -247,7 +239,6 @@ pub trait DisplayExt: Display {
             image.storage().seg_id,
             0,
         )?;
-        image.storage_mut().mark_shared();
         Ok(cookie)
     }
 
@@ -265,21 +256,31 @@ pub trait DisplayExt: Display {
         dest_y: i16,
         send_event: bool,
     ) -> Result<()> {
-        let cookie = self.shm_put_ximage_neh(
-            image, drawable, gc, src_x, src_y, width, height, dest_x, dest_y, send_event,
+        let cookie = self.shm_put_image(
+            drawable.into(),
+            gc.into(),
+            image.width() as _,
+            image.height() as _,
+            src_x,
+            src_y,
+            width,
+            height,
+            dest_x,
+            dest_y,
+            image.depth(),
+            image.format().format().into(),
+            send_event,
+            image.storage().seg_id,
+            0,
         )?;
         self.wait_for_reply(cookie)
     }
-}
 
-impl<D: Display + ?Sized> DisplayExt for D {}
-
-/// Extension traits for a special event display.
-pub trait SEDExt {
-    /// Setup a special event queue for SHM.
-    fn shm_setup_queue(&mut self) -> usize;
-
-    /// Send an SHM image to the X11 server.
+    /// Write an SHM image to the server, but wait to confirm that
+    /// it's finished.
+    ///
+    /// Events that are not SHM related are stored in the passed-in
+    /// queue.
     fn shm_put_ximage(
         &mut self,
         image: &mut ShmImage,
@@ -291,63 +292,39 @@ pub trait SEDExt {
         height: u16,
         dest_x: i16,
         dest_y: i16,
-        shm_event_key: usize,
-    ) -> Result<()>;
-}
-
-impl<D: Display + ?Sized> SEDExt for SpecialEventDisplay<D> {
-    fn shm_setup_queue(&mut self) -> usize {
-        self.create_special_event_queue(|event| matches!(event, Event::ShmCompletion(..)))
-    }
-
-    fn shm_put_ximage(
-        &mut self,
-        image: &mut ShmImage,
-        drawable: impl Into<Drawable>,
-        gc: impl Into<Gcontext>,
-        src_x: u16,
-        src_y: u16,
-        width: u16,
-        height: u16,
-        dest_x: i16,
-        dest_y: i16,
-        shm_event_key: usize,
+        queue: &mut impl Extend<Event>,
     ) -> Result<()> {
-        // send the image, first things first
+        // send the image to the server
         self.shm_put_ximage_neh_checked(
             image, drawable, gc, src_x, src_y, width, height, dest_x, dest_y, true,
         )?;
 
-        // wait for the completion event
+        // wait for the server to acknowledge the image
         loop {
-            let event = self.wait_for_special_event(shm_event_key)?;
+            let event = self.wait_for_event()?;
+            let event = match event {
+                Event::ShmCompletion(shm_event) => {
+                    if shm_event.shmseg == image.storage().seg_id {
+                        break;
+                    }
 
-            // make sure that the event is for the right image
-            let completion = match event {
-                Event::ShmCompletion(completion) => completion,
-                _ => panic!("expected SHM completion event"),
+                    // TODO: send the event back into the event queue,
+                    // since we probably got an event meant for another
+                    // image
+                    Event::ShmCompletion(shm_event)
+                }
+                event => event,
             };
 
-            if completion.shmseg != image.storage().seg_id {
-                // we received another image's completion event, send it back
-                // so it continues propogating
-                continue;
-                // todo!("bug psychon into adding serialization methods to events");
-            }
-
-            // the image is no longer shared, we can mark it as such
-            #[allow(unsafe_code)]
-            unsafe {
-                image.storage_mut().mark_unshared();
-            }
-
-            break;
+            queue.extend(Some(event));
         }
 
         Ok(())
     }
 }
 
+impl<D: Display + ?Sized> ShmDisplayExt for D {}
+
 pub mod prelude {
-    pub use crate::{DisplayExt, SEDExt};
+    pub use crate::ShmDisplayExt;
 }

@@ -1,16 +1,27 @@
+#               Copyright John Nunley, 2022.
+# Distributed under the Boost Software License, Version 1.0.
+#       (See accompanying file LICENSE or copy at
+#         https://www.boost.org/LICENSE_1_0.txt)
+
 [package]
 name = "breadx-shm"
 version = "0.1.0"
-edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+edition = "2018"
+authors = ["notgull <jtnunley01@gmail.com>"]
+description = "SHM transport for breadx"
+license = "BSL-1.0"
+homepage = "https://github.com/bread-graphics/breadx-shm#readme"
+repository = "https://github.com/bread-graphics/breadx-shm"
 
 [dependencies]
-breadx = { path = "../breadx/breadx", default-features = false, features = ["shm"] }
-breadx-image = { path = "../breadx-image", default-features = false }
-breadx-special-events = { path = "../breadx-special-events", default-features = false }
+breadx = { version = "3", default-features = false, features = ["shm"] }
+breadx-image = { version = "0.1", default-features = false }
 libc = { version = "0.2.126", default-features = false }
 
 [dev-dependencies]
+breadx = { version = "3", features = ["std"] }
 image = "0.24.2"
 tracing-subscriber = "0.3.11"
+
+[package.metadata.docs.rs]
+all-features = true
