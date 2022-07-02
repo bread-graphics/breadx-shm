@@ -10,4 +10,3 @@ Consult the [LICENSE](./LICENSE) file or consult the [web mirror] for
 more information.
 
 [web mirror]: https://www.boost.org/LICENSE_1_0.txt
->>>>>>> 5417748 (Make some API changes)
