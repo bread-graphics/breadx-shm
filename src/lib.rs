@@ -23,7 +23,7 @@ use breadx::{
     display::{Display, DisplayExt as _, DisplayFunctionsExt},
     protocol::{
         shm as xshm,
-        xproto::{Drawable, Gcontext},
+        xproto::{Drawable, Gcontext, Pixmap},
         Event,
     },
     Result,
@@ -39,7 +39,7 @@ pub struct ShmSegment {
 }
 
 /// A segment attached to X11 for the purpose of receiving SHM images.
-pub struct ShmReceiver {
+pub struct ShmBuffer {
     /// The transport to the X11 server.
     transport: ShmTransport,
     /// The segment ID used by the server to keep track of the segment.
@@ -47,7 +47,7 @@ pub struct ShmReceiver {
 }
 
 pub type ShmImage = Image<ShmSegment>;
-pub type ShmRecvImage = Image<ShmReceiver>;
+pub type ShmRecvImage = Image<ShmBuffer>;
 
 impl AsRef<[u8]> for ShmSegment {
     fn as_ref(&self) -> &[u8] {
@@ -55,7 +55,7 @@ impl AsRef<[u8]> for ShmSegment {
     }
 }
 
-impl AsRef<[u8]> for ShmReceiver {
+impl AsRef<[u8]> for ShmBuffer {
     fn as_ref(&self) -> &[u8] {
         self.transport.as_ref()
     }
@@ -67,7 +67,7 @@ impl AsMut<[u8]> for ShmSegment {
     }
 }
 
-impl AsMut<[u8]> for ShmReceiver {
+impl AsMut<[u8]> for ShmBuffer {
     fn as_mut(&mut self) -> &mut [u8] {
         self.transport.as_mut()
     }
@@ -79,7 +79,7 @@ impl Borrow<[u8]> for ShmSegment {
     }
 }
 
-impl Borrow<[u8]> for ShmReceiver {
+impl Borrow<[u8]> for ShmBuffer {
     fn borrow(&self) -> &[u8] {
         self.transport.borrow()
     }
@@ -91,7 +91,7 @@ impl BorrowMut<[u8]> for ShmSegment {
     }
 }
 
-impl BorrowMut<[u8]> for ShmReceiver {
+impl BorrowMut<[u8]> for ShmBuffer {
     fn borrow_mut(&mut self) -> &mut [u8] {
         self.transport.borrow_mut()
     }
@@ -105,7 +105,7 @@ impl Deref for ShmSegment {
     }
 }
 
-impl Deref for ShmReceiver {
+impl Deref for ShmBuffer {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
@@ -119,7 +119,7 @@ impl DerefMut for ShmSegment {
     }
 }
 
-impl DerefMut for ShmReceiver {
+impl DerefMut for ShmBuffer {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.transport.as_mut()
     }
@@ -144,7 +144,7 @@ impl ShmSegment {
     }
 }
 
-impl ShmReceiver {
+impl ShmBuffer {
     /// Creates a new SHM receiver and attaches it to the X11 server.
     pub fn attach(display: &mut impl Display, len: usize) -> Result<Self> {
         // first, create the underlying SHM block
@@ -320,6 +320,34 @@ pub trait ShmDisplayExt: Display {
         }
 
         Ok(())
+    }
+
+    /// Create a `Pixmap` using an `ShmTransport` as a backing storage.
+    fn shm_create_pixmap_transport(
+        &mut self,
+        pid: Pixmap,
+        drawable: Drawable,
+        width: u16,
+        height: u16,
+        depth: u8,
+        shmseg: &mut ShmBuffer,
+        offset: u32,
+    ) -> Result<Cookie<()>> {
+        self.shm_create_pixmap(pid, drawable, width, height, depth, shmseg.seg_id, offset)
+    }
+
+    /// Create a `Pixmap` using an `ShmTransport` as a backing storage.
+    fn shm_create_pixmap_transport_checked(
+        &mut self,
+        pid: Pixmap,
+        drawable: Drawable,
+        width: u16,
+        height: u16,
+        depth: u8,
+        shmseg: &mut ShmBuffer,
+        offset: u32,
+    ) -> Result<()> {
+        self.shm_create_pixmap_checked(pid, drawable, width, height, depth, shmseg.seg_id, offset)
     }
 }
 

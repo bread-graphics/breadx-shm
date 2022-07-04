@@ -34,8 +34,8 @@ macro_rules! syscall {
 /// It is invariant to the structure, unless otherwise noted, that
 /// the shared memory segment is set to the flags 0744. This ensures
 /// that only the current process has write access to the memory; the X11
-/// server we send it to does not. 
-/// 
+/// server we send it to does not.
+///
 /// While it is possible to change the
 /// data while the X server is reading it, several heated conversations
 /// on the Rust discord server have assured me that Rust is an independent
